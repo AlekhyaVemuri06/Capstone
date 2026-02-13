@@ -1,0 +1,17 @@
+# Core Data Science
+pandas
+# TensorFlow 2.10 is incompatible with Numpy 2.0+, so we must pin it lower
+numpy<2.0.0  
+matplotlib
+scikit-learn
+jupyter
+
+# Deep Learning Framework (Golden Version for Windows + GPU)
+# We use tensorflow-cpu because the DirectML plugin handles the GPU part
+tensorflow-cpu==2.10.0
+tensorflow-text==2.10.0
+tensorflow-hub
+
+# GPU Support for Intel/AMD on Windows
+# This plugin specifically requires tensorflow-cpu==2.10
+tensorflow-directml-plugin
