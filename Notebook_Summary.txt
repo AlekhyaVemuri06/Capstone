@@ -1,0 +1,98 @@
+NOTEBOOK TECHNICAL SUMMARY
+Sequential Sentence Classification — PubMed 20k RCT (Intel Arc XPU Edition)
+═══════════════════════════════════════════════════════════════════════════════
+
+OBJECTIVE
+─────────
+Classify each sentence in a medical abstract into one of five structural
+roles: BACKGROUND, OBJECTIVE, METHODS, RESULTS, CONCLUSIONS. Input is raw
+text; output is a labelled sentence list.
+
+
+DATASET
+───────
+PubMed 20k RCT — ~240k sentences from randomised controlled trial abstracts.
+Split: ~180k train / ~30k validation / ~30k test.
+Each sentence is pre-labelled and carries its position within the abstract
+(used for EDA; not fed into models in this version).
+
+
+FRAMEWORK
+─────────
+PyTorch (nightly XPU build) on Intel Arc GPU. TensorFlow removed entirely —
+no Arc XPU support exists. scikit-learn handles the baseline model only.
+Mixed precision: bfloat16 AMP via torch.amp.autocast. GradScaler disabled
+(not needed for bfloat16 on Arc A-series).
+
+
+MODELS
+──────
+Five models trained in sequence, each building on the last.
+
+M0 — Naïve Bayes + TF-IDF  (~73%)
+  TfidfVectorizer (50k unigrams + bigrams, sublinear TF) feeds a
+  MultinomialNB classifier. No neural network, no GPU. Trains in seconds.
+  Establishes the performance floor.
+
+M1 — Conv1D Token Embedding  (~81%)
+  Custom word vocab (50k tokens). Each token maps to a 128-dim learned
+  embedding. Three parallel Conv1d layers (kernels 3, 5, 7) scan for
+  phrase patterns, each followed by global max-pool. Outputs concatenated
+  (384-dim) then passed through two dense layers to 5-class logits.
+  Trained with AdamW (lr=1e-3), ReduceLROnPlateau, early stopping (p=3).
+
+M2 — MiniLM Transfer Learning  (~85%)
+  all-MiniLM-L6-v2 (sentence-transformers) encodes every sentence into a
+  384-dim vector on XPU. Encoder is frozen — only a 3-layer dense head
+  (384→256→128→5) is trained. AdamW lr=1e-3, early stopping (p=5).
+  Replaces the original USE/tensorflow-hub approach, which breaks on
+  Python 3.12 Windows.
+
+M3 — Conv1D Character Embedding  (~79%)
+  Character-level tokenisation (max 300 chars). 64-dim char embeddings.
+  Five parallel Conv1d layers (kernels 2–6), each global max-pooled and
+  concatenated (640-dim), then two dense layers. Handles medical
+  abbreviations (IL-6, hsCRP, TNF-α) that word-level models mark unknown.
+
+M4 — BERT Fine-tuning  (~90%)
+  bert-base-uncased (110M params) loaded via HuggingFace Transformers.
+  BertTokenizerFast tokenises to max 128 tokens. All 110M parameters
+  updated during fine-tuning — full domain adaptation, not just a head.
+  AdamW (lr=2e-5, weight_decay=0.01), linear warmup (10% of steps) then
+  linear decay, gradient clipping at 1.0. Batch size 32. Fixed 4 epochs
+  (no early stopping — standard BERT fine-tune schedule).
+  Best checkpoint saved by validation accuracy.
+
+
+SHARED TRAINING INFRASTRUCTURE (Models 1–3)
+────────────────────────────────────────────
+Single train_pytorch_model() function handles the training loop for all
+three Conv1D / MiniLM models: AdamW optimiser, ReduceLROnPlateau scheduler,
+early stopping with best-weight restoration, bfloat16 AMP on XPU.
+Re-run guard (if 'history1' not in dir()) prevents accidental retraining
+when cells are re-executed.
+
+
+EVALUATION
+──────────
+Metrics: accuracy and weighted F1 on both validation and test sets.
+Confusion matrices (normalised) per model. Per-class accuracy breakdown
+for BERT showing where errors concentrate (typically BACKGROUND vs
+OBJECTIVE — the hardest boundary).
+Final comparison: all five models in one table and grouped bar chart.
+
+
+MODEL SAVING
+────────────
+M0  → pickle (sklearn Pipeline)
+M1–3 → torch.save(state_dict)  — architecture must be re-instantiated to load
+M4  → model.save_pretrained()  — full HuggingFace format, self-contained
+Vocabularies (word2idx, char2idx) and LabelEncoder saved as pickles.
+
+
+EXPECTED RUNTIME ON INTEL ARC A770 (16GB)
+──────────────────────────────────────────
+M0: ~1 min  |  M1: ~20 min  |  M2: ~35 min  |  M3: ~20 min  |  M4: ~45 min
+Total: ~2 hours  (vs ~18 hours on CPU TensorFlow)
+
+═══════════════════════════════════════════════════════════════════════════════
